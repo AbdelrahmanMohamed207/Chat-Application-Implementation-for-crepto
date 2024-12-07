@@ -3,6 +3,8 @@ from flask_socketio import SocketIO, emit
 from flask_cors import CORS
 from Crypto.Cipher import DES3
 from Crypto.Util.Padding import pad, unpad
+from Crypto.PublicKey import RSA
+from Crypto.Cipher import PKCS1_OAEP
 import base64
 import os
 from argon2 import PasswordHasher
@@ -19,19 +21,57 @@ socketio = SocketIO(app, cors_allowed_origins="*")
 raw_key = b'secure_key_must_be_24_by'
 SECRET_KEY = DES3.adjust_key_parity(raw_key)
 
+# RSA Key Generation (only need to run once)
+def generate_rsa_keys():
+    key = RSA.generate(2048)
+    private_key = key.export_key()
+    public_key = key.publickey().export_key()
+    with open('private.pem', 'wb') as f:
+        f.write(private_key)
+    with open('public.pem', 'wb') as f:
+        f.write(public_key)
+
+# Uncomment this line to generate keys once
+# generate_rsa_keys()
+
+# Load the RSA keys for encryption/decryption
+def load_rsa_keys():
+    with open('private.pem', 'rb') as f:
+        private_key = RSA.import_key(f.read())
+    with open('public.pem', 'rb') as f:
+        public_key = RSA.import_key(f.read())
+    return private_key, public_key
+
+private_key, public_key = load_rsa_keys()
+
+# RSA Encryption and Decryption
+def rsa_encrypt(data, public_key):
+    cipher = PKCS1_OAEP.new(public_key)
+    return cipher.encrypt(data)
+
+def rsa_decrypt(encrypted_data, private_key):
+    cipher = PKCS1_OAEP.new(private_key)
+    return cipher.decrypt(encrypted_data)
+
 def encrypt_message(message):
     iv = get_random_bytes(8)  # Generate random IV
     cipher = DES3.new(SECRET_KEY, DES3.MODE_CBC, iv)
-    padded_message = pad(message.encode(), DES3.block_size)
+    padded_message = pad(message.encode(), DES3.block_size)  # Pad the message
     encrypted = cipher.encrypt(padded_message)
-    return base64.b64encode(iv + encrypted).decode()
+    return base64.b64encode(iv + encrypted).decode()  # Combine IV and encrypted message, then base64 encode
 
 def decrypt_message(encrypted_message):
-    raw_data = base64.b64decode(encrypted_message)
-    iv = raw_data[:8]  # Extract the first 8 bytes as the IV
-    cipher = DES3.new(SECRET_KEY, DES3.MODE_CBC, iv)
-    decrypted = unpad(cipher.decrypt(raw_data[8:]), DES3.block_size)
-    return decrypted.decode()
+    try:
+        raw_data = base64.b64decode(encrypted_message)  # Decode the base64 encoded string
+        iv = raw_data[:8]  # Extract the IV (first 8 bytes)
+        encrypted_data = raw_data[8:]  # Extract the actual encrypted data
+
+        cipher = DES3.new(SECRET_KEY, DES3.MODE_CBC, iv)
+        decrypted = unpad(cipher.decrypt(encrypted_data), DES3.block_size)  # Decrypt and remove padding
+        return decrypted.decode()  # Return the decrypted message as a string
+    except Exception as e:
+        print(f"Error during decryption: {e}")
+        raise
 
 # File for storing user data
 USER_FILE = "users.txt"
@@ -95,6 +135,9 @@ connected_users = {}
 @socketio.on('connect')
 def handle_connect():
     print("A user connected.")
+    with open('public.pem', 'rb') as f:
+        public_key = base64.b64encode(f.read()).decode()
+    emit('public_key', {'public_key': public_key})
 
 @socketio.on('login')
 def handle_login(data):
@@ -116,14 +159,14 @@ def handle_message(data):
         with open(DEBUG_FILE, "a") as debug_file:
             debug_file.write(f"Encrypted message from {username}: {encrypted_message}\n")
 
-        # Decrypt and log to console
+        # Decrypt the message and log to console
         message = decrypt_message(encrypted_message)
         print(f"Message from {username}: {message}")
 
         # Broadcast encrypted message for privacy
         emit('message', encrypt_message(f"{username}: {message}"), broadcast=True)
     except Exception as e:
-        print("Error decrypting message:", e)
+        print(f"Error decrypting message: {e}")
 
 @socketio.on('disconnect')
 def handle_disconnect():
